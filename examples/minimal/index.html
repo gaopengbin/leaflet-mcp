@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Leaflet MCP — Minimal Demo</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a2e; color: #eee; }
+    #map { width: 100vw; height: 100vh; }
+    #status {
+      position: absolute; top: 12px; right: 12px; z-index: 1000;
+      background: rgba(0,0,0,0.7); padding: 8px 16px; border-radius: 8px;
+      font-size: 13px; display: flex; align-items: center; gap: 8px;
+    }
+    #status .dot { width: 8px; height: 8px; border-radius: 50%; }
+    #status .dot.connected { background: #22c55e; }
+    #status .dot.disconnected { background: #ef4444; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="status">
+    <span class="dot disconnected" id="statusDot"></span>
+    <span id="statusText">Connecting...</span>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Initialize Leaflet map
+    const map = L.map('map').setView([20, 0], 3);
+    const baseLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 19,
+    }).addTo(map);
+
+    // ==================== Bridge (inline, for demo) ====================
+
+    const WS_URL = 'ws://localhost:9400';
+    let ws = null;
+    let reconnectTimer = null;
+    let idCounter = 0;
+    const layers = new Map();   // id -> { layer, name, type }
+    const markers = new Map();  // id -> { marker, title }
+
+    // Register the OSM base layer so listLayers/removeLayer can target it
+    layers.set('__base__', { layer: baseLayer, name: 'OSM Base', type: 'tile' });
+
+    function genId(prefix) { return `${prefix}_${++idCounter}_${Date.now().toString(36)}`; }
+
+    function setStatus(connected) {
+      document.getElementById('statusDot').className = `dot ${connected ? 'connected' : 'disconnected'}`;
+      document.getElementById('statusText').textContent = connected ? 'Connected to MCP Runtime' : 'Disconnected';
+    }
+
+    const handlers = {
+      // View
+      flyTo(p) {
+        map.flyTo([p.latitude, p.longitude], p.zoom ?? map.getZoom(), { duration: (p.duration ?? 2000) / 1000 });
+        return handlers.getView();
+      },
+      setView(p) {
+        map.setView([p.latitude, p.longitude], p.zoom ?? map.getZoom());
+        return handlers.getView();
+      },
+      getView() {
+        const c = map.getCenter();
+        const b = map.getBounds();
+        return {
+          center: [c.lng, c.lat],
+          zoom: map.getZoom(),
+          bounds: [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()],
+        };
+      },
+      fitBounds(p) {
+        map.fitBounds([[p.south, p.west], [p.north, p.east]], {
+          padding: p.padding != null ? [p.padding, p.padding] : undefined,
+          maxZoom: p.maxZoom,
+          animate: p.animate ?? true,
+        });
+        return handlers.getView();
+      },
+      zoomIn() { map.zoomIn(1); return handlers.getView(); },
+      zoomOut() { map.zoomOut(1); return handlers.getView(); },
+
+      // Layer
+      addTileLayer(p) {
+        const id = p.id || genId('tile');
+        const type = p.type || 'osm';
+        let url, attribution = p.attribution;
+        if (type === 'osm' || !p.url) {
+          url = p.url || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+          attribution = attribution || '&copy; OpenStreetMap contributors';
+        } else {
+          url = p.url;
+        }
+        const layer = L.tileLayer(url, {
+          attribution,
+          opacity: p.opacity ?? 1,
+          maxZoom: p.maxZoom ?? 19,
+          subdomains: p.subdomains ?? 'abc',
+        });
+        layer.addTo(map);
+        layers.set(id, { layer, name: p.name || id, type: 'tile' });
+        return { layerId: id };
+      },
+      removeLayer(p) {
+        const entry = layers.get(p.id);
+        if (!entry) return false;
+        map.removeLayer(entry.layer);
+        layers.delete(p.id);
+        return true;
+      },
+      listLayers() {
+        return Array.from(layers.entries()).map(([id, { layer, name, type }]) => ({
+          id, name, type,
+          visible: map.hasLayer(layer),
+          opacity: layer.options?.opacity ?? 1,
+        }));
+      },
+      setLayerOpacity(p) {
+        const entry = layers.get(p.id);
+        if (!entry) return false;
+        if (typeof entry.layer.setOpacity === 'function') {
+          entry.layer.setOpacity(p.opacity);
+          return true;
+        }
+        return false;
+      },
+
+      // Marker
+      addMarker(p) {
+        const id = p.id || genId('marker');
+        const opts = { title: p.title, draggable: p.draggable ?? false };
+        if (p.iconUrl) {
+          opts.icon = L.icon({
+            iconUrl: p.iconUrl,
+            iconSize: p.iconSize || [25, 41],
+            iconAnchor: p.iconAnchor || [12, 41],
+          });
+        }
+        const marker = L.marker([p.latitude, p.longitude], opts);
+        if (p.popup) marker.bindPopup(p.popup);
+        marker.addTo(map);
+        markers.set(id, { marker, title: p.title || '' });
+        return { markerId: id };
+      },
+      removeMarker(p) {
+        const entry = markers.get(p.id);
+        if (!entry) return false;
+        map.removeLayer(entry.marker);
+        markers.delete(p.id);
+        return true;
+      },
+      listMarkers() {
+        return Array.from(markers.entries()).map(([id, { marker, title }]) => {
+          const ll = marker.getLatLng();
+          const popupContent = marker.getPopup()?.getContent();
+          return {
+            id,
+            position: [ll.lng, ll.lat],
+            title,
+            popup: typeof popupContent === 'string' ? popupContent : null,
+          };
+        });
+      },
+
+      // GeoJSON
+      addGeoJSON(p) {
+        const id = p.id || genId('geojson');
+        const layer = L.geoJSON(p.data, {
+          style: p.style ? () => ({
+            color: p.style.color ?? '#3B82F6',
+            weight: p.style.weight ?? 2,
+            opacity: p.style.opacity ?? 1,
+            fillColor: p.style.fillColor ?? p.style.color ?? '#3B82F6',
+            fillOpacity: p.style.fillOpacity ?? 0.4,
+          }) : undefined,
+          onEachFeature: p.popupProperty ? (feature, lyr) => {
+            const v = feature.properties?.[p.popupProperty];
+            if (v != null) lyr.bindPopup(String(v));
+          } : undefined,
+        });
+        layer.addTo(map);
+        layers.set(id, { layer, name: p.name || id, type: 'geojson' });
+        let count = 0;
+        layer.eachLayer(() => { count++; });
+        return { layerId: id, featureCount: count };
+      },
+
+      // Popup
+      openPopup(p) {
+        L.popup({ closeOnClick: p.closeOnClick ?? true })
+          .setLatLng([p.latitude, p.longitude])
+          .setContent(p.html)
+          .openOn(map);
+        return { ok: true };
+      },
+      closePopup() { map.closePopup(); return { ok: true }; },
+    };
+
+    // WebSocket connection
+    function connectWS() {
+      ws = new WebSocket(WS_URL);
+      ws.onopen = () => {
+        setStatus(true);
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.method && handlers[msg.method]) {
+            try {
+              const result = handlers[msg.method](msg.params || {});
+              if (msg.id) ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }));
+            } catch (err) {
+              if (msg.id) ws.send(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -1, message: err.message } }));
+            }
+          }
+        } catch {}
+      };
+      ws.onclose = () => {
+        setStatus(false);
+        reconnectTimer = setTimeout(connectWS, 3000);
+      };
+      ws.onerror = () => ws.close();
+    }
+
+    connectWS();
+  </script>
+</body>
+</html>
