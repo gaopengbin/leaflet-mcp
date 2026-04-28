@@ -1,0 +1,25 @@
+name: Feature Request
+description: 提一个新工具或新功能 / Propose a new tool or feature
+labels: [enhancement]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 使用场景 / Use case
+      description: 你想做什么？为什么现有工具不够用？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 方案 / Proposal
+      placeholder: |
+        新工具名：addPolyline
+        参数：{ id?, points: [{lon,lat}], color?, weight? }
+        对应 Leaflet API：L.polyline(...)
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 备选方案 / Alternatives
